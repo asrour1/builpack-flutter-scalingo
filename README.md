@@ -1,32 +1,25 @@
-# Scalingo Buildpack Flutter Web 🚀
+# Scalingo Buildpack for Flutter Web 🚀
 
-Buildpack pour compiler et déployer des applications **Flutter Web** sur [Scalingo](https://scalingo.com).
+Deploy **Flutter Web** applications on [Scalingo](https://scalingo.com) with zero configuration headaches.
 
-Inspiré de [diezep/heroku-buildpack-flutter](https://github.com/diezep/heroku-buildpack-flutter) et adapté aux spécificités de la plateforme Scalingo (stack Ubuntu 22.04, buildpack Nginx, multi-buildpacks).
+This buildpack downloads the Flutter SDK, compiles your project to static web files, and pairs with the [Scalingo Nginx buildpack](https://github.com/Scalingo/nginx-buildpack) to serve them — producing a **lightweight slug** with no SDK bloat in production.
 
-## Fonctionnalités
+Tested and working on Scalingo's `scalingo-22` stack (Ubuntu 22.04).
 
-- ✅ Téléchargement et cache automatique du Flutter SDK
-- ✅ Cache des dépendances pub entre les builds
-- ✅ Version de Flutter configurable
-- ✅ Nettoyage automatique (pas de SDK en production, slug léger)
-- ✅ Support des projets Flutter dans un sous-répertoire
-- ✅ Compatible avec le multi-buildpack Scalingo (Flutter + Nginx)
+---
 
-## Installation
+## Quick Start
 
-### Méthode recommandée : Flutter + Nginx (multi-buildpack)
+### 1. Add three files to your Flutter project root
 
-Cette méthode utilise le buildpack Flutter pour compiler l'app, puis le buildpack Nginx de Scalingo pour servir les fichiers statiques.
-
-**1. Créez un fichier `.buildpacks` à la racine de votre projet :**
+**`.buildpacks`**
 
 ```
-https://github.com/<votre-user>/scalingo-buildpack-flutter.git
+https://github.com/asrour1/builpack-flutter-scalingo.git
 https://github.com/Scalingo/nginx-buildpack.git
 ```
 
-**2. Créez un fichier `nginx.conf` à la racine :**
+**`nginx.conf`**
 
 ```nginx
 root /app/build/web;
@@ -35,74 +28,113 @@ location / {
     try_files $uri $uri/ /index.html =404;
 }
 
-# Cache des assets Flutter
-location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|map)$ {
     expires 1y;
     add_header Cache-Control "public, immutable";
 }
+
+location = /index.html {
+    add_header Cache-Control "no-cache, no-store, must-revalidate";
+    add_header Pragma "no-cache";
+    expires 0;
+}
 ```
 
-**3. Créez un `Procfile` :**
+**`Procfile`**
 
 ```
 web: bin/run
 ```
 
-> `bin/run` est généré automatiquement par le buildpack Nginx de Scalingo.
+> `bin/run` is generated automatically by the Scalingo Nginx buildpack.
 
-**4. Configurez l'app Scalingo :**
+### 2. Create and deploy on Scalingo
 
 ```bash
-scalingo create mon-app-flutter
+# Create the app
+scalingo create my-flutter-app
+
+# Set your Flutter version (required — see "Choosing a version" below)
+scalingo -a my-flutter-app env-set FLUTTER_VERSION=3.41.7
+
+# Add the Scalingo git remote
+git remote add scalingo git@ssh.osc-fr1.scalingo.io:my-flutter-app.git
+
+# Deploy
+git add .buildpacks nginx.conf Procfile
+git commit -m "Add Scalingo deployment config"
 git push scalingo main
 ```
 
-### Méthode alternative : buildpack seul
+That's it. Your Flutter Web app is live.
 
-Si vous utilisez un autre serveur (Node.js, Python, etc.) pour servir les fichiers :
+---
 
-```bash
-scalingo env-set BUILDPACK_URL=https://github.com/<votre-user>/scalingo-buildpack-flutter.git
+## Choosing the right Flutter version
+
+**This is the most important step.** Your `pubspec.yaml` declares a minimum Dart SDK version. Each Flutter release bundles a specific Dart SDK. If they don't match, `flutter pub get` will fail.
+
+Check your `pubspec.yaml`:
+
+```yaml
+environment:
+  sdk: ^3.10.1  # ← This is the Dart SDK constraint
 ```
 
-Vous devrez alors configurer votre propre serveur pour servir le dossier `build/web`.
+Then find a Flutter version that includes a compatible Dart SDK:
 
-## Variables d'environnement
+| Dart SDK needed | Flutter version to use |
+|----------------|----------------------|
+| `^3.5.0`       | `3.24.0`             |
+| `^3.6.0`       | `3.27.0`             |
+| `^3.10.0`      | `3.38.0`             |
+| `^3.10.1`      | `3.41.7`             |
 
-| Variable | Défaut | Description |
+Full list: [Flutter SDK releases](https://docs.flutter.dev/release/archive)
+
+```bash
+scalingo -a my-flutter-app env-set FLUTTER_VERSION=3.41.7
+```
+
+> **Tip:** If the build fails with `version solving failed`, the error message usually suggests the correct Flutter version. Use it.
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
 |---|---|---|
-| `FLUTTER_VERSION` | *Dernière version stable* | Version de Flutter à utiliser (ex: `3.24.0`) |
-| `FLUTTER_CHANNEL` | `stable` | Canal Flutter (`stable`, `beta`, `dev`) |
-| `FLUTTER_BUILD_ARGS` | `--release` | Arguments passés à `flutter build web` |
-| `FLUTTER_CLEANUP` | `true` | Supprime les artefacts de build pour réduire le slug |
-| `FLUTTER_SOURCE_DIR` | *(racine)* | Sous-répertoire contenant le projet Flutter |
-| `FLUTTER_DEPLOY_DIR` | `build/web` | Répertoire de sortie des fichiers compilés |
+| `FLUTTER_VERSION` | `3.24.0` | Flutter SDK version to download. **Always set this explicitly.** |
+| `FLUTTER_CHANNEL` | `stable` | Flutter channel (`stable`, `beta`, `dev`) |
+| `FLUTTER_BUILD_ARGS` | `--release` | Arguments passed to `flutter build web` |
+| `FLUTTER_CLEANUP` | `true` | Remove source files and platform dirs after build to reduce slug size |
+| `FLUTTER_SOURCE_DIR` | *(root)* | Subdirectory containing the Flutter project |
+| `FLUTTER_DEPLOY_DIR` | `build/web` | Output directory for compiled files |
 
-### Exemples
+### Examples
 
 ```bash
-# Fixer une version Flutter spécifique (recommandé)
-scalingo env-set FLUTTER_VERSION=3.24.0
+# Inject environment variables at build time
+scalingo -a my-app env-set FLUTTER_BUILD_ARGS="--release --dart-define=API_URL=https://api.example.com"
 
-# Build avec des options supplémentaires
-scalingo env-set FLUTTER_BUILD_ARGS="--release --dart-define=API_URL=https://api.example.com"
+# Flutter project is in a subdirectory
+scalingo -a my-app env-set FLUTTER_SOURCE_DIR=frontend
 
-# Projet Flutter dans un sous-dossier
-scalingo env-set FLUTTER_SOURCE_DIR=frontend
-
-# Déployer les fichiers dans un dossier personnalisé
-scalingo env-set FLUTTER_DEPLOY_DIR=public
+# Deploy compiled files to a custom directory
+scalingo -a my-app env-set FLUTTER_DEPLOY_DIR=public
 ```
 
-## Structure du projet
+---
 
-### Projet simple (Flutter à la racine)
+## Project Structure
+
+### Simple project (Flutter at root)
 
 ```
-mon-projet/
-├── .buildpacks
-├── nginx.conf
-├── Procfile
+my-app/
+├── .buildpacks          ← points to Flutter + Nginx buildpacks
+├── nginx.conf           ← Nginx config for SPA routing
+├── Procfile             ← web: bin/run
 ├── pubspec.yaml
 ├── lib/
 │   └── main.dart
@@ -110,14 +142,14 @@ mon-projet/
     └── index.html
 ```
 
-### Projet avec Flutter dans un sous-dossier
+### Monorepo (Flutter in a subdirectory)
 
 ```
-mon-projet/
+my-project/
 ├── .buildpacks
 ├── nginx.conf
 ├── Procfile
-├── frontend/          ← FLUTTER_SOURCE_DIR=frontend
+├── frontend/            ← set FLUTTER_SOURCE_DIR=frontend
 │   ├── pubspec.yaml
 │   ├── lib/
 │   └── web/
@@ -125,24 +157,58 @@ mon-projet/
     └── ...
 ```
 
-## Dépannage
+For a monorepo setup, update your `nginx.conf` root if `FLUTTER_DEPLOY_DIR` changes:
 
-### Le build échoue au téléchargement du SDK
-
-Vérifiez que la version Flutter spécifiée existe. Consultez les [releases Flutter](https://docs.flutter.dev/release/archive) pour les versions disponibles.
-
-```bash
-# Vérifier la version actuelle
-scalingo env | grep FLUTTER
+```nginx
+root /app/public;  # if FLUTTER_DEPLOY_DIR=public
 ```
 
-### Slug trop volumineux
+---
 
-Assurez-vous que `FLUTTER_CLEANUP=true` (c'est le défaut). Si le slug reste trop gros, vérifiez que vous n'avez pas de fichiers lourds dans votre repo (assets non optimisés, etc.).
+## How It Works
 
-### Erreur 404 sur les routes
+The buildpack follows the standard [Scalingo buildpack API](https://doc.scalingo.com/platform/deployment/buildpacks/custom):
 
-Flutter Web utilise le routing côté client. Votre configuration Nginx doit inclure le fallback vers `index.html` :
+1. **`bin/detect`** — Detects a Flutter project by checking for `pubspec.yaml`
+2. **`bin/compile`** — The main build script:
+   - Downloads the Flutter SDK archive (cached between deploys)
+   - Runs `flutter pub get` to install dependencies
+   - Runs `flutter build web --release` to compile
+   - Removes source code, platform dirs, and build caches to minimize slug size
+3. **`bin/release`** — Provides the default process type
+
+The Scalingo Nginx buildpack then serves the compiled static files from `build/web/`.
+
+### Build cache
+
+The Flutter SDK and pub dependencies are cached between deploys. A version change triggers a fresh SDK download; otherwise, rebuilds reuse the cached SDK for faster deploys.
+
+---
+
+## Troubleshooting
+
+### `version solving failed`
+
+Your Flutter version doesn't include the Dart SDK your project needs. Read the error message — it usually tells you exactly which Flutter version to use:
+
+```
+You can try the following suggestion to make the pubspec resolve:
+* Try using the Flutter SDK version: 3.41.7.
+```
+
+Then:
+```bash
+scalingo -a my-app env-set FLUTTER_VERSION=3.41.7
+git commit --allow-empty -m "rebuild" && git push scalingo main
+```
+
+### `getcwd: cannot access parent directories`
+
+This was fixed in version 1.1.0 of this buildpack. Make sure your `.buildpacks` file points to the latest version.
+
+### 404 errors on routes
+
+Flutter Web uses client-side routing. Your `nginx.conf` **must** include the fallback to `index.html`:
 
 ```nginx
 location / {
@@ -150,40 +216,56 @@ location / {
 }
 ```
 
-### Cache de build obsolète
+### Slug too large
 
-Pour forcer un build propre :
+Make sure `FLUTTER_CLEANUP=true` (the default). The buildpack removes `android/`, `ios/`, `linux/`, `macos/`, `windows/`, `test/`, `lib/`, and `.dart_tool/` from the slug. Only the compiled web files are kept.
+
+If it's still too large, check your `web/` directory for unoptimized assets.
+
+### Force a clean rebuild
 
 ```bash
-# Faire un commit vide et redéployer
 git commit --allow-empty -m "clean rebuild"
 git push scalingo main
 ```
 
-## Compatibilité
+To clear the SDK cache entirely, you can use the Scalingo dashboard to purge the build cache.
 
-- **Stack Scalingo** : scalingo-22 (Ubuntu 22.04)
-- **Flutter** : 3.x+ (testé avec 3.19+)
-- **Dart** : Inclus avec le Flutter SDK
+---
 
-## Comment ça marche
+## Compatibility
 
-1. **`bin/detect`** : Détecte un projet Flutter par la présence de `pubspec.yaml`
-2. **`bin/compile`** :
-   - Télécharge le Flutter SDK (avec cache entre les builds)
-   - Installe les dépendances (`flutter pub get`)
-   - Compile l'app web (`flutter build web`)
-   - Nettoie les artefacts de build
-3. **`bin/release`** : Fournit la commande de démarrage par défaut
+| Component | Supported |
+|---|---|
+| **Scalingo stack** | `scalingo-22` (Ubuntu 22.04) |
+| **Flutter SDK** | 3.x (tested with 3.24.0, 3.38.0, 3.41.7) |
+| **Dart SDK** | Included with Flutter SDK |
 
-Le buildpack Nginx de Scalingo prend ensuite le relais pour servir les fichiers statiques compilés.
+---
 
-## Licence
+## Using with other server technologies
 
-MIT
+If you don't want to use Nginx and prefer Node.js, Python, or another server, you can use this buildpack alone:
 
-## Crédits
+```bash
+scalingo -a my-app env-set BUILDPACK_URL=https://github.com/asrour1/builpack-flutter-scalingo.git
+```
 
-- Inspiré par [diezep/heroku-buildpack-flutter](https://github.com/diezep/heroku-buildpack-flutter)
-- Architecture inspirée de [EE/heroku-buildpack-flutter-light](https://github.com/EE/heroku-buildpack-flutter-light)
-- Adapté pour [Scalingo](https://scalingo.com) par [Agence Digitale Iroko](https://iroko.digital)
+Set `FLUTTER_DEPLOY_DIR` to the directory your server expects to serve static files from, and write your own `Procfile` to start your server.
+
+---
+
+## Contributing
+
+Issues and PRs welcome. If you run into a problem, include your build logs — they contain all the info needed to debug.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE)
+
+## Credits
+
+- Inspired by [diezep/heroku-buildpack-flutter](https://github.com/diezep/heroku-buildpack-flutter) and [EE/heroku-buildpack-flutter-light](https://github.com/EE/heroku-buildpack-flutter-light)
+- Built for [Scalingo](https://scalingo.com) by [Agence Digitale Iroko](https://iroko.io)
