@@ -103,10 +103,12 @@ install_flutter_archive() {
     fi
     
     rm -rf "${CACHE_DIR}/flutter-download"
+    cd "${BUILD_DIR}"
     echo "${version}" > "${FLUTTER_SDK_VERSION_FILE}"
   else
     echo "       Archive download failed, falling back to git..."
     rm -rf "${CACHE_DIR}/flutter-download"
+    cd "${BUILD_DIR}"
     return 1
   fi
 }
