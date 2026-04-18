@@ -4,6 +4,18 @@
 
 set -eo pipefail
 
+#!/usr/bin/env bash
+set -eo pipefail
+
+echo "-----> [DEBUG] Compile script started"
+echo "       BUILD_DIR: ${1}"
+echo "       CACHE_DIR: ${2}"
+echo "       ENV_DIR: ${3}"
+echo "       Contents of BUILD_DIR:"
+ls -la "${1}/" || echo "       Cannot list BUILD_DIR"
+echo "       Checking pubspec.yaml:"
+cat "${1}/pubspec.yaml" | head -5 || echo "       Cannot read pubspec.yaml"
+
 # -------- Arguments --------
 BUILD_DIR="${1}"
 CACHE_DIR="${2}"
