@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# bin/detect <build-dir>
+# Detects if this is a Flutter web project
+
+BUILD_DIR="${1}"
+
+if [ -f "${BUILD_DIR}/pubspec.yaml" ]; then
+  echo "Flutter Web"
+  exit 0
+else
+  echo "no"
+  exit 1
+fi

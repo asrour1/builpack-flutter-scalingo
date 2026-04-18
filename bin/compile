@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+# bin/compile <build-dir> <cache-dir> <env-dir>
+# Compiles a Flutter web application for Scalingo
+
+set -eo pipefail
+
+# -------- Arguments --------
+BUILD_DIR="${1}"
+CACHE_DIR="${2}"
+ENV_DIR="${3}"
+
+# -------- Helper functions --------
+indent() {
+  sed -u 's/^/       /'
+}
+
+export_env_dir() {
+  local env_dir="${1}"
+  if [ -d "${env_dir}" ]; then
+    local whitelist_regex='(FLUTTER_VERSION|FLUTTER_BUILD_ARGS|FLUTTER_CLEANUP|FLUTTER_SOURCE_DIR|FLUTTER_DEPLOY_DIR|FLUTTER_CHANNEL|PUB_CACHE)'
+    for e in $(ls "${env_dir}"); do
+      echo "${e}" | grep -qE "${whitelist_regex}" && export "${e}=$(cat "${env_dir}/${e}")"
+    done
+  fi
+}
+
+# -------- Load environment variables --------
+export_env_dir "${ENV_DIR}"
+
+# -------- Configuration (with defaults) --------
+FLUTTER_CHANNEL="${FLUTTER_CHANNEL:-stable}"
+FLUTTER_VERSION="${FLUTTER_VERSION:-}"
+FLUTTER_BUILD_ARGS="${FLUTTER_BUILD_ARGS:---release}"
+FLUTTER_CLEANUP="${FLUTTER_CLEANUP:-true}"
+FLUTTER_SOURCE_DIR="${FLUTTER_SOURCE_DIR:-}"
+FLUTTER_DEPLOY_DIR="${FLUTTER_DEPLOY_DIR:-build/web}"
+
+# -------- Resolve Flutter version --------
+resolve_flutter_version() {
+  local channel="${1}"
+  local requested_version="${2}"
+
+  if [ -n "${requested_version}" ]; then
+    echo "${requested_version}"
+  else
+    # Fetch latest stable version from Flutter releases
+    local latest
+    latest=$(curl -s "https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json" \
+      | grep -o '"version":"[^"]*"' \
+      | head -1 \
+      | cut -d'"' -f4)
+    
+    if [ -z "${latest}" ]; then
+      # Fallback: try to get from the channel-specific hash
+      latest=$(curl -s "https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json" \
+        | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+channel_hash = data.get('current_release', {}).get('${channel}', '')
+for release in data.get('releases', []):
+    if release.get('hash') == channel_hash:
+        print(release.get('version', ''))
+        break
+" 2>/dev/null)
+    fi
+    
+    if [ -z "${latest}" ]; then
+      echo "3.24.0"  # Safe fallback
+    else
+      echo "${latest}"
+    fi
+  fi
+}
+
+FLUTTER_VERSION=$(resolve_flutter_version "${FLUTTER_CHANNEL}" "${FLUTTER_VERSION}")
+
+echo "-----> Flutter Web Buildpack for Scalingo"
+echo "       Flutter version: ${FLUTTER_VERSION} (channel: ${FLUTTER_CHANNEL})"
+echo "       Build args: ${FLUTTER_BUILD_ARGS}"
+echo "       Cleanup: ${FLUTTER_CLEANUP}"
+
+# -------- Cache management --------
+FLUTTER_CACHE_DIR="${CACHE_DIR}/flutter"
+PUB_CACHE_DIR="${CACHE_DIR}/pub-cache"
+
+mkdir -p "${CACHE_DIR}"
+mkdir -p "${PUB_CACHE_DIR}"
+
+export PUB_CACHE="${PUB_CACHE_DIR}"
+
+# -------- Install Flutter SDK --------
+FLUTTER_SDK_DIR="${CACHE_DIR}/flutter-sdk"
+FLUTTER_SDK_VERSION_FILE="${FLUTTER_SDK_DIR}/.flutter-version"
+
+install_flutter() {
+  local version="${1}"
+  local sdk_url="https://storage.googleapis.com/flutter_infra_release/releases/${FLUTTER_CHANNEL}/linux/flutter_linux_${version}-${FLUTTER_CHANNEL}.tar.xz"
+
+  echo "-----> Downloading Flutter SDK ${version}..."
+  
+  # Try the versioned URL first
+  local http_code
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" "${sdk_url}")
+  
+  if [ "${http_code}" != "200" ]; then
+    # Try alternative URL format
+    sdk_url="https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${version}-stable.tar.xz"
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" "${sdk_url}")
+  fi
+
+  if [ "${http_code}" != "200" ]; then
+    echo "       WARNING: Could not download pre-built SDK (HTTP ${http_code})" | indent
+    echo "       Falling back to git clone..." | indent
+    
+    rm -rf "${FLUTTER_SDK_DIR}"
+    git clone --depth 1 --branch "${version}" https://github.com/flutter/flutter.git "${FLUTTER_SDK_DIR}" 2>&1 | indent
+  else
+    rm -rf "${FLUTTER_SDK_DIR}"
+    mkdir -p "${FLUTTER_SDK_DIR}"
+    
+    curl -sL "${sdk_url}" | tar xJ -C "${CACHE_DIR}" 2>&1 | indent
+    
+    # The tar extracts to a 'flutter' directory
+    if [ -d "${CACHE_DIR}/flutter" ] && [ "${CACHE_DIR}/flutter" != "${FLUTTER_SDK_DIR}" ]; then
+      rm -rf "${FLUTTER_SDK_DIR}"
+      mv "${CACHE_DIR}/flutter" "${FLUTTER_SDK_DIR}"
+    fi
+  fi
+
+  echo "${version}" > "${FLUTTER_SDK_VERSION_FILE}"
+}
+
+# Check if we have the right version cached
+if [ -f "${FLUTTER_SDK_VERSION_FILE}" ]; then
+  CACHED_VERSION=$(cat "${FLUTTER_SDK_VERSION_FILE}")
+  if [ "${CACHED_VERSION}" = "${FLUTTER_VERSION}" ]; then
+    echo "-----> Using cached Flutter SDK ${FLUTTER_VERSION}"
+  else
+    echo "-----> Cached Flutter version (${CACHED_VERSION}) differs from requested (${FLUTTER_VERSION})"
+    install_flutter "${FLUTTER_VERSION}"
+  fi
+else
+  install_flutter "${FLUTTER_VERSION}"
+fi
+
+# -------- Set up PATH --------
+export PATH="${FLUTTER_SDK_DIR}/bin:${FLUTTER_SDK_DIR}/bin/cache/dart-sdk/bin:${PATH}"
+
+# -------- Verify Flutter installation --------
+echo "-----> Verifying Flutter installation..."
+flutter --version 2>&1 | indent
+
+# -------- Enable web support --------
+echo "-----> Enabling Flutter web support..."
+flutter config --enable-web 2>&1 | indent
+
+# -------- Pre-cache web build tools --------
+echo "-----> Pre-caching web build tools..."
+flutter precache --web 2>&1 | indent
+
+# -------- Resolve source directory --------
+if [ -n "${FLUTTER_SOURCE_DIR}" ]; then
+  SOURCE_DIR="${BUILD_DIR}/${FLUTTER_SOURCE_DIR}"
+else
+  SOURCE_DIR="${BUILD_DIR}"
+fi
+
+if [ ! -f "${SOURCE_DIR}/pubspec.yaml" ]; then
+  echo "ERROR: pubspec.yaml not found in ${SOURCE_DIR}" | indent
+  exit 1
+fi
+
+# -------- Install dependencies --------
+echo "-----> Installing Flutter dependencies..."
+cd "${SOURCE_DIR}"
+flutter pub get 2>&1 | indent
+
+# -------- Build the web app --------
+echo "-----> Building Flutter web application..."
+flutter build web ${FLUTTER_BUILD_ARGS} 2>&1 | indent
+
+# -------- Deploy built files --------
+echo "-----> Deploying built files..."
+
+# The build output is in SOURCE_DIR/build/web
+WEB_BUILD_DIR="${SOURCE_DIR}/build/web"
+
+if [ ! -d "${WEB_BUILD_DIR}" ]; then
+  echo "ERROR: Build output not found at ${WEB_BUILD_DIR}" | indent
+  exit 1
+fi
+
+# If using multi-buildpack with nginx, we need files accessible at /app
+# Copy web build output to the deploy directory
+DEPLOY_TARGET="${BUILD_DIR}/${FLUTTER_DEPLOY_DIR}"
+
+if [ "${FLUTTER_DEPLOY_DIR}" != "build/web" ] || [ -n "${FLUTTER_SOURCE_DIR}" ]; then
+  mkdir -p "${DEPLOY_TARGET}"
+  cp -R "${WEB_BUILD_DIR}/"* "${DEPLOY_TARGET}/"
+  echo "       Built files copied to ${FLUTTER_DEPLOY_DIR}" | indent
+fi
+
+# -------- Cleanup --------
+if [ "${FLUTTER_CLEANUP}" = "true" ]; then
+  echo "-----> Cleaning up build artifacts..."
+  
+  # Remove Flutter SDK from the build directory (it stays in cache)
+  # Remove .dart_tool, .packages, etc.
+  find "${BUILD_DIR}" -name ".dart_tool" -type d -exec rm -rf {} + 2>/dev/null || true
+  find "${BUILD_DIR}" -name ".packages" -type f -delete 2>/dev/null || true
+  
+  # Remove source files if source dir is specified (keep only built files)
+  if [ -n "${FLUTTER_SOURCE_DIR}" ]; then
+    # Keep the deploy dir and remove the source flutter project
+    echo "       Removing source files from ${FLUTTER_SOURCE_DIR}" | indent
+  fi
+  
+  echo "       Cleanup complete" | indent
+fi
+
+# -------- Create .profile.d script --------
+echo "-----> Creating runtime environment..."
+mkdir -p "${BUILD_DIR}/.profile.d"
+cat > "${BUILD_DIR}/.profile.d/flutter.sh" << 'PROFILE'
+# Flutter web runtime environment
+# No Flutter SDK needed at runtime - only static files are served
+export PATH="/app/bin:${PATH}"
+PROFILE
+
+echo "-----> Flutter web build complete!"
+echo "       Output: ${FLUTTER_DEPLOY_DIR}"

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# bin/release <build-dir>
+# Outputs default configuration for the application
+
+cat << EOF
+---
+default_process_types:
+  web: bin/run
+EOF
