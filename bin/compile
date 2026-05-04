@@ -28,6 +28,46 @@ export_env_dir() {
   fi
 }
 
+# Build --dart-define arguments from individual env vars
+# Reads: API_BASE_URL, ENVIRONMENT, DEBUG, HTTP_TIMEOUT, API_KEY, and any DART_DEFINE_* variable
+build_dart_defines() {
+  local env_dir="${1}"
+  local dart_defines=""
+  
+  if [ ! -d "${env_dir}" ]; then
+    echo ""
+    return
+  fi
+  
+  # Explicit well-known variables to inject
+  local known_vars="API_BASE_URL ENVIRONMENT DEBUG HTTP_TIMEOUT API_KEY API_CERT_PIN_SHA1"
+  
+  for var in ${known_vars}; do
+    if [ -f "${env_dir}/${var}" ]; then
+      local val
+      val=$(cat "${env_dir}/${var}")
+      dart_defines="${dart_defines} --dart-define=${var}=${val}"
+      echo "       dart-define: ${var}=${val}" >&2
+    fi
+  done
+  
+  # Also read any DART_DEFINE_* variables (generic escape hatch)
+  # e.g. DART_DEFINE_MY_VAR=hello → --dart-define=MY_VAR=hello
+  for f in $(ls "${env_dir}" 2>/dev/null); do
+    case "${f}" in
+      DART_DEFINE_*)
+        local var_name="${f#DART_DEFINE_}"
+        local val
+        val=$(cat "${env_dir}/${f}")
+        dart_defines="${dart_defines} --dart-define=${var_name}=${val}"
+        echo "       dart-define: ${var_name}=${val}" >&2
+        ;;
+    esac
+  done
+  
+  echo "${dart_defines}"
+}
+
 # -------- Load environment variables --------
 echo "-----> Loading environment variables..."
 export_env_dir "${ENV_DIR}"
@@ -171,10 +211,15 @@ echo "-----> Working directory: $(pwd)"
 echo "-----> Installing Flutter dependencies (pub get)..."
 flutter pub get 2>&1 | indent
 
+# -------- Build dart-define arguments from env vars --------
+echo "-----> Resolving --dart-define variables..."
+DART_DEFINE_ARGS=$(build_dart_defines "${ENV_DIR}")
+
 # -------- Build the web app --------
 echo "-----> Building Flutter web application..."
-echo "       Command: flutter build web ${FLUTTER_BUILD_ARGS}"
-flutter build web ${FLUTTER_BUILD_ARGS} 2>&1 | indent
+FULL_BUILD_ARGS="${FLUTTER_BUILD_ARGS}${DART_DEFINE_ARGS}"
+echo "       Command: flutter build web ${FULL_BUILD_ARGS}"
+flutter build web ${FULL_BUILD_ARGS} 2>&1 | indent
 
 # -------- Verify build output --------
 WEB_BUILD_DIR="${SOURCE_DIR}/build/web"
